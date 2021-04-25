@@ -13,6 +13,7 @@ import nltk
 
 # nltk setup, to be able to use the tokenizer.
 nltk.download('punkt')
+nltk.download('stopwords')
 
 # Consts and enums
 RELATIVE_INPUT_SOURCE_DIR = "books/"
@@ -22,6 +23,7 @@ RARE_WORD_RELATIVE_MULTIPLIER = 1000
 TOKEN_BLACKLIST = [".", ",", "?", "!", "..."]
 # We throw out words in the query with a zipf score above this value.
 ZIPF_FREQUENCY_THRESHOLD = 6
+STOPWORDS = nltk.corpus.stopwords.words("english")
 
 
 class Capabilities(Enum):
@@ -29,20 +31,59 @@ class Capabilities(Enum):
     SIMPLE_WORD_FREQ = 1
     # The ratio between the appearance rate in the doc, vs. in all English text.
     RELATIVE_WORD_FREQ = 2
+    # NLTK provided frequency distribution
+    NLTK_WORD_FREQ = 3
 
 
-def naive_tokenize(string):
-    """
-    Naive implementation of getting tokens out of a string.
-    """
-    return [word.strip() for word in string.split(" ")]
+class Flags(Enum):
+    # Use context_based scoring over other kinds of scoring
+    CONTEXT_BASED_SCORING = 1
 
 
-def better_tokenize(string):
-    """
-    Smarter tokenizing from NLTK. We tokenize using the library, then filter punctuation and contractions, and make everything lowercase.
-    """
-    return list(map(lambda w: w.lower(), filter(lambda word: not("'" in word or word in TOKEN_BLACKLIST), nltk.word_tokenize(string))))
+class Utils:
+    def naive_tokenize(string):
+        """
+        Naive implementation of getting tokens out of a string.
+        """
+        return [word.strip() for word in string.split(" ")]
+
+    def better_tokenize(string):
+        """
+        Smarter tokenizing from NLTK. We tokenize using the library, then filter punctuation and contractions, and make everything lowercase.
+        """
+        return list(map(lambda w: w.lower(), filter(lambda word: not("'" in word or word in TOKEN_BLACKLIST), nltk.word_tokenize(string))))
+
+    def best_tokenize(string):
+        """
+        Best tokenizing, using NLTK, and then programatically avoiding need for a blacklist. Filtering out common words via NLTK's given blacklist.
+        """
+        words = [w.lower() for w in nltk.word_tokenize(string)
+                 if w.isalpha() and w.lower() not in STOPWORDS]
+        return words
+
+    def score_ngrams(book_ngram, query_ngram):
+        """
+        We compare the similarity of a query ngram to a book ngram by seeing how
+        frequently ngrams from the query appear in the book. We normalize the
+        book frequency by diving by the number of words in the book, to avoid
+        penalizing short books. Multiply by 100 to get a larger value.
+        """
+        book_num_words = sum(book_ngram.values())
+        score = 0.0
+        for ngram in query_ngram:
+            if book_ngram[ngram] > 1:
+                print("ngram \"{}\" appears {} times in query, {} times in book".format(
+                    ngram, query_ngram[ngram], book_ngram[ngram]))
+            score += query_ngram[ngram] * \
+                (book_ngram[ngram] / book_num_words) * 100000
+        return score
+
+    def fprint(text):
+        original_stdout = sys.stdout
+        with open("debug_log.txt", 'a+') as debug_file:
+            sys.stdout = debug_file
+            print(text)
+            sys.stdout = original_stdout
 
 
 def build_document(title, raw_text):
@@ -60,21 +101,33 @@ def build_document(title, raw_text):
             return "\"{}\"".format(self.title)
 
         def affinity_score(self, raw_query):
-
             def process_query(raw_query):
                 # First, filter out common words from the query.
                 # zipf frequencies are effectively on a scale of 0 to 8. They
                 # correspond to the base-10 logarithm of the number of times the
                 # word appears per billion words.
                 # See https://pypi.org/project/wordfreq/ for details.
-                words = better_tokenize(raw_query)
+                words = Utils.best_tokenize(raw_query)
                 words = filter(lambda word: zipf_frequency(
                     word, "en") < ZIPF_FREQUENCY_THRESHOLD, words)
                 return words
-            words_counter = Counter(process_query(raw_query))
-
             total_score = 0.0
+            query_words = process_query(raw_query)
 
+            query_bigram_finder = nltk.collocations.BigramCollocationFinder.from_words(
+                query_words)
+            query_trigram_finder = nltk.collocations.TrigramCollocationFinder.from_words(
+                query_words)
+            bigram_score = Utils.score_ngrams(
+                self.nltk_bigram_finder.ngram_fd, query_bigram_finder.ngram_fd)
+            trigram_score = Utils.score_ngrams(
+                self.nltk_trigram_finder.ngram_fd, query_trigram_finder.ngram_fd)
+
+            Utils.fprint("ngram scores for Book {}: 2: {}, 3: {}".format(
+                self.title, bigram_score, trigram_score))
+            total_score += bigram_score + trigram_score
+
+            words_counter = Counter(query_words)
             original_stdout = sys.stdout
             with open("debug_log.txt", 'a+') as debug_file:
                 sys.stdout = debug_file
@@ -92,7 +145,6 @@ def build_document(title, raw_text):
                 # Sort in order of total score.
                 scoring_info.sort(key=lambda x: -x[3])
 
-                total_score = 0.0
                 for (query_word, frequency, k_value, point_value) in scoring_info:
                     print("\"{}\" appears {} times, with k_value of {}, giving a score of {}".format(
                         query_word, frequency, k_value, point_value))
@@ -107,31 +159,25 @@ def build_document(title, raw_text):
     if DEBUG_MODE:
         print("{} Book length has {} lines".format(title, len(raw_text)))
 
-    # simple frequency map
-    doc.capabilities_list.append(Capabilities.SIMPLE_WORD_FREQ)
     word_list = []
     for line in raw_text:
-        word_list.extend(better_tokenize(line))
+        word_list.extend(Utils.best_tokenize(line))
+    doc.num_words = len(word_list)
 
-    # Some minimal post-processing to remove artifacts.
-    def spammy_word_filter(word):
-        """
-        Returns true if a word is okay, false if a word is spammy.
-        """
-        spam_checks = [word.startswith("_"), word.endswith("_")]
-        return not any(spam_checks)
-    doc.simple_word_freq = Counter(filter(spammy_word_filter, word_list))
+    doc.nltk_word_freq = nltk.FreqDist(word_list)
+    doc.nltk_bigram_finder = nltk.collocations.BigramCollocationFinder.from_words(
+        word_list)
+    doc.nltk_trigram_finder = nltk.collocations.TrigramCollocationFinder.from_words(
+        word_list)
 
     # Relative word frequency
-    if Capabilities.SIMPLE_WORD_FREQ in doc.capabilities_list:
-        doc.capabilities_list.append(Capabilities.RELATIVE_WORD_FREQ)
-        word_count = sum(doc.simple_word_freq.values())
-        doc.relative_word_freq = Counter()
-        for word in doc.simple_word_freq:
-            document_word_rate = doc.simple_word_freq[word] / word_count
-            english_word_rate = word_frequency(word, "en")
-            doc.relative_word_freq[word] = RARE_WORD_RELATIVE_MULTIPLIER if english_word_rate == 0 else document_word_rate / \
-                english_word_rate
+    word_count = sum(doc.nltk_word_freq.values())
+    doc.relative_word_freq = Counter()
+    for word in doc.nltk_word_freq:
+        document_word_rate = doc.nltk_word_freq[word] / word_count
+        english_word_rate = word_frequency(word, "en")
+        doc.relative_word_freq[word] = RARE_WORD_RELATIVE_MULTIPLIER if english_word_rate == 0 else document_word_rate / \
+            english_word_rate
 
     return doc
 
@@ -182,6 +228,12 @@ def main():
     book_list = get_book_file_list()
     for title, path in book_list:
         docs_list.append(build_document(title, read_book(path)))
+
+    # # print(docs_list[0])
+    # bigrams = docs_list[0].nltk_bigram_finder
+    # ngram_fd1 = bigrams.ngram_fd
+    #
+    # print(ngram_fd1.most_common(10))
 
     query = input("[Computer] What's on your mind today?\n[User] ")
     while query:
