@@ -19,6 +19,9 @@ RELATIVE_INPUT_SOURCE_DIR = "books/"
 DEBUG_MODE = False
 # This is the ratio to use if a legitimate english word appears in the document that appears ~0 times in English normally.
 RARE_WORD_RELATIVE_MULTIPLIER = 1000
+TOKEN_BLACKLIST = [".", ",", "?", "!", "..."]
+# We throw out words in the query with a zipf score above this value.
+ZIPF_FREQUENCY_THRESHOLD = 6
 
 
 class Capabilities(Enum):
@@ -37,9 +40,9 @@ def naive_tokenize(string):
 
 def better_tokenize(string):
     """
-    Smarter tokenizing from NLTK.
+    Smarter tokenizing from NLTK. We tokenize using the library, then filter punctuation and contractions, and make everything lowercase.
     """
-    return nltk.word_tokenize(string)
+    return list(map(lambda w: w.lower(), filter(lambda word: not("'" in word or word in TOKEN_BLACKLIST), nltk.word_tokenize(string))))
 
 
 def build_document(title, raw_text):
@@ -60,12 +63,13 @@ def build_document(title, raw_text):
 
             def process_query(raw_query):
                 # First, filter out common words from the query.
-                # zipf frequencies are effectively on a scale of 0 to 8. They correspond to
-                # the base-10 logarithm of the number of times it appears per billion words.
+                # zipf frequencies are effectively on a scale of 0 to 8. They
+                # correspond to the base-10 logarithm of the number of times the
+                # word appears per billion words.
                 # See https://pypi.org/project/wordfreq/ for details.
                 words = better_tokenize(raw_query)
                 words = filter(lambda word: zipf_frequency(
-                    word, "en") < 6, words)
+                    word, "en") < ZIPF_FREQUENCY_THRESHOLD, words)
                 return words
             words_counter = Counter(process_query(raw_query))
 
@@ -101,12 +105,15 @@ def build_document(title, raw_text):
     doc = Document(title)
 
     if DEBUG_MODE:
-        print("{} Book length is {}".format(title, len(raw_text)))
+        print("{} Book length has {} lines".format(title, len(raw_text)))
 
     # simple frequency map
     doc.capabilities_list.append(Capabilities.SIMPLE_WORD_FREQ)
-    word_list = better_tokenize(" ".join(raw_text).lower())
+    word_list = []
+    for line in raw_text:
+        word_list.extend(better_tokenize(line))
 
+    # Some minimal post-processing to remove artifacts.
     def spammy_word_filter(word):
         """
         Returns true if a word is okay, false if a word is spammy.
@@ -143,7 +150,7 @@ def read_book(file_path):
         orig_lines_length = len(lines)
 
         # Do some minimal pre-processing to clean out non-book content.
-        # 1. Filter out the Project Gutenberg info from the top and bottom.
+        # Filter out the Project Gutenberg info from the top and bottom.
         proj_gut_header_end_index = 0
         proj_gut_footer_end_index = len(lines)
         for i in range(len(lines)):
