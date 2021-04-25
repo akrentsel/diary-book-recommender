@@ -9,6 +9,11 @@ from os.path import isfile, join
 
 from wordfreq import word_frequency, zipf_frequency
 
+import nltk
+
+# nltk setup, to be able to use the tokenizer.
+nltk.download('punkt')
+
 # Consts and enums
 RELATIVE_INPUT_SOURCE_DIR = "books/"
 DEBUG_MODE = False
@@ -27,7 +32,14 @@ def naive_tokenize(string):
     """
     Naive implementation of getting tokens out of a string.
     """
-    return re.findall(r'\w+', string)
+    return [word.strip() for word in string.split(" ")]
+
+
+def better_tokenize(string):
+    """
+    Smarter tokenizing from NLTK.
+    """
+    return nltk.word_tokenize(string)
 
 
 def build_document(title, raw_text):
@@ -51,7 +63,7 @@ def build_document(title, raw_text):
                 # zipf frequencies are effectively on a scale of 0 to 8. They correspond to
                 # the base-10 logarithm of the number of times it appears per billion words.
                 # See https://pypi.org/project/wordfreq/ for details.
-                words = naive_tokenize(raw_query)
+                words = better_tokenize(raw_query)
                 words = filter(lambda word: zipf_frequency(
                     word, "en") < 6, words)
                 return words
@@ -93,7 +105,7 @@ def build_document(title, raw_text):
 
     # simple frequency map
     doc.capabilities_list.append(Capabilities.SIMPLE_WORD_FREQ)
-    word_list = re.findall(r'\w+', " ".join(raw_text).lower())
+    word_list = better_tokenize(" ".join(raw_text).lower())
 
     def spammy_word_filter(word):
         """
@@ -169,7 +181,7 @@ def main():
         book_suggestion_title = find_similar_book(query, docs_list)
         print("[Computer] Wow, I hadn't thought about it that way. You know, you should read {}...it might be right up your alley.\n".format(
             book_suggestion_title))
-        query = input("Computer] What are you thinking about now?\n")
+        query = input("[Computer] What are you thinking about now?\n")
 
 
 main()
