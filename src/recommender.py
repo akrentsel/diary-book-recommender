@@ -1,11 +1,13 @@
 
 import collections
 import re
+import sys
+from collections import Counter
 from enum import Enum
 from os import listdir
 from os.path import isfile, join
 
-from wordfreq import word_frequency
+from wordfreq import word_frequency, zipf_frequency
 
 # Consts and enums
 RELATIVE_INPUT_SOURCE_DIR = "books/"
@@ -52,10 +54,37 @@ def build_document(title, raw_text):
                 words = naive_tokenize(raw_query)
                 words = filter(lambda word: zipf_frequency(
                     word, "en") < 6, words)
+                return words
             words_counter = Counter(process_query(raw_query))
 
-            # Now, we will calculate a score using our relative word freq.
-            return sum([self.relative_word_freq[word] * words_counter[word] for word in words_counter])
+            total_score = 0.0
+
+            original_stdout = sys.stdout
+            with open("debug_log.txt", 'a+') as debug_file:
+                sys.stdout = debug_file
+                # For debugging purposes, let's print out exactly how we are calculating our scores.
+                print("Scoring Book {} for query {}...:".format(
+                    self.title, raw_query[:10]))
+                print("--------------------------------")
+
+                # List of (query_word, frequency, k_value, point_value) tuples
+                scoring_info = []
+                for word in words_counter:
+                    scoring_info.append(
+                        (word, words_counter[word], self.relative_word_freq[word], words_counter[word] * self.relative_word_freq[word]))
+
+                # Sort in order of total score.
+                scoring_info.sort(key=lambda x: -x[3])
+
+                total_score = 0.0
+                for (query_word, frequency, k_value, point_value) in scoring_info:
+                    print("\"{}\" appears {} times, with k_value of {}, giving a score of {}".format(
+                        query_word, frequency, k_value, point_value))
+                    total_score += point_value
+                print("Total score: {}".format(total_score))
+                print("--------------------------------")
+                sys.stdout = original_stdout
+            return total_score
 
     doc = Document(title)
 
@@ -72,14 +101,13 @@ def build_document(title, raw_text):
         """
         spam_checks = [word.startswith("_"), word.endswith("_")]
         return not any(spam_checks)
-    doc.simple_word_freq = collections.Counter(
-        filter(spammy_word_filter, word_list))
+    doc.simple_word_freq = Counter(filter(spammy_word_filter, word_list))
 
     # Relative word frequency
     if Capabilities.SIMPLE_WORD_FREQ in doc.capabilities_list:
         doc.capabilities_list.append(Capabilities.RELATIVE_WORD_FREQ)
         word_count = sum(doc.simple_word_freq.values())
-        doc.relative_word_freq = collections.Counter()
+        doc.relative_word_freq = Counter()
         for word in doc.simple_word_freq:
             document_word_rate = doc.simple_word_freq[word] / word_count
             english_word_rate = word_frequency(word, "en")
@@ -122,7 +150,7 @@ def read_book(file_path):
 
 def find_similar_book(query, docs_list):
     # First we do our scoring
-    scores = [{doc.title, doc.affinity_score(query)} for doc in docs_list]
+    scores = {doc.title: doc.affinity_score(query) for doc in docs_list}
 
     if DEBUG_MODE:
         print(sorted(scores))
@@ -135,6 +163,13 @@ def main():
     book_list = get_book_file_list()
     for title, path in book_list:
         docs_list.append(build_document(title, read_book(path)))
+
+    query = input("[Computer] What's on your mind today?\n[User] ")
+    while query:
+        book_suggestion_title = find_similar_book(query, docs_list)
+        print("[Computer] Wow, I hadn't thought about it that way. You know, you should read {}...it might be right up your alley.\n".format(
+            book_suggestion_title))
+        query = input("Computer] What are you thinking about now?\n")
 
 
 main()
