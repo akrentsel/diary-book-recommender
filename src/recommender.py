@@ -1,3 +1,10 @@
+"""
+recommender.py: Provides a Dcoument Builder and query function, along with
+auxillary utils. Main method handles processing books in the specified directory
+and setting up an input loop.
+
+Author: Alex Krentsel
+"""
 
 import collections
 import re
@@ -24,23 +31,14 @@ TOKEN_BLACKLIST = [".", ",", "?", "!", "..."]
 # We throw out words in the query with a zipf score above this value.
 ZIPF_FREQUENCY_THRESHOLD = 6
 STOPWORDS = nltk.corpus.stopwords.words("english")
-
-
-class Capabilities(Enum):
-    # Simple number of times that the word appears in the document source.
-    SIMPLE_WORD_FREQ = 1
-    # The ratio between the appearance rate in the doc, vs. in all English text.
-    RELATIVE_WORD_FREQ = 2
-    # NLTK provided frequency distribution
-    NLTK_WORD_FREQ = 3
-
-
-class Flags(Enum):
-    # Use context_based scoring over other kinds of scoring
-    CONTEXT_BASED_SCORING = 1
+# Parameter that can be fine-tuned to more heavily weigh ngram matches.
+NGRAM_WEIGHT_MULTIPLIER = 50
 
 
 class Utils:
+    """
+    Common shared utilities.
+    """
     def naive_tokenize(string):
         """
         Naive implementation of getting tokens out of a string.
@@ -72,13 +70,16 @@ class Utils:
         score = 0.0
         for ngram in query_ngram:
             if book_ngram[ngram] > 1:
-                print("ngram \"{}\" appears {} times in query, {} times in book".format(
+                Utils.dprint("ngram \"{}\" appears {} times in query, {} times in book".format(
                     ngram, query_ngram[ngram], book_ngram[ngram]))
             score += query_ngram[ngram] * \
-                (book_ngram[ngram] / book_num_words) * 100000
+                (book_ngram[ngram] / book_num_words) * 100
         return score
 
-    def fprint(text):
+    def dprint(text):
+        """
+        Print out to a debug file, debug_log.txt.
+        """
         original_stdout = sys.stdout
         with open("debug_log.txt", 'a+') as debug_file:
             sys.stdout = debug_file
@@ -88,14 +89,18 @@ class Utils:
 
 def build_document(title, raw_text):
     """
-    Note: raw_text is a list of lines in the book.
+    Factory class for creating and annotating a document.
 
-    We hide the Document class so it can only be instantiated via the builder.
+    Note: raw_text is a list of lines in the book. We hide the Document class so
+    it can only be instantiated via the builder.
     """
     class Document:
+        """
+        Class that represents an item in our search space. In this case, a book.
+        """
+
         def __init__(self, title):
             self.title = title
-            self.capabilities_list = []
 
         def __repr__(self):
             return "\"{}\"".format(self.title)
@@ -108,12 +113,33 @@ def build_document(title, raw_text):
                 # word appears per billion words.
                 # See https://pypi.org/project/wordfreq/ for details.
                 words = Utils.best_tokenize(raw_query)
-                words = filter(lambda word: zipf_frequency(
-                    word, "en") < ZIPF_FREQUENCY_THRESHOLD, words)
-                return words
+                return list(filter(lambda word: zipf_frequency(
+                    word, "en") < ZIPF_FREQUENCY_THRESHOLD, words))
             total_score = 0.0
             query_words = process_query(raw_query)
 
+            words_counter = Counter(query_words)
+
+            # For debugging purposes, let's print out exactly how we are calculating our scores.
+            Utils.dprint("Scoring Book {} for query {}...:".format(
+                self.title, raw_query[:10]))
+            Utils.dprint("--------------------------------")
+
+            # List of (query_word, frequency, k_value, point_value) tuples
+            scoring_info = []
+            for word in words_counter:
+                scoring_info.append(
+                    (word, words_counter[word], self.relative_word_freq[word], words_counter[word] * self.relative_word_freq[word]))
+
+            # Sort in order of total score.
+            scoring_info.sort(key=lambda x: -x[3])
+
+            for (query_word, frequency, k_value, point_value) in scoring_info:
+                Utils.dprint("\"{}\" appears {} times, with k_value of {}, giving a score of {}".format(
+                    query_word, frequency, k_value, point_value))
+                total_score += point_value
+
+            # Add bonus points for matching ngrams.
             query_bigram_finder = nltk.collocations.BigramCollocationFinder.from_words(
                 query_words)
             query_trigram_finder = nltk.collocations.TrigramCollocationFinder.from_words(
@@ -123,46 +149,21 @@ def build_document(title, raw_text):
             trigram_score = Utils.score_ngrams(
                 self.nltk_trigram_finder.ngram_fd, query_trigram_finder.ngram_fd)
 
-            Utils.fprint("ngram scores for Book {}: 2: {}, 3: {}".format(
-                self.title, bigram_score, trigram_score))
-            total_score += bigram_score + trigram_score
+            bonus_points = NGRAM_WEIGHT_MULTIPLIER * \
+                (bigram_score + trigram_score)
+            Utils.dprint("ngram scores for Book {}: (bi, {}), (tri, {}), adding {} bonus points".format(
+                self.title, bigram_score, trigram_score, bonus_points))
+            total_score += bonus_points
 
-            words_counter = Counter(query_words)
-            original_stdout = sys.stdout
-            with open("debug_log.txt", 'a+') as debug_file:
-                sys.stdout = debug_file
-                # For debugging purposes, let's print out exactly how we are calculating our scores.
-                print("Scoring Book {} for query {}...:".format(
-                    self.title, raw_query[:10]))
-                print("--------------------------------")
-
-                # List of (query_word, frequency, k_value, point_value) tuples
-                scoring_info = []
-                for word in words_counter:
-                    scoring_info.append(
-                        (word, words_counter[word], self.relative_word_freq[word], words_counter[word] * self.relative_word_freq[word]))
-
-                # Sort in order of total score.
-                scoring_info.sort(key=lambda x: -x[3])
-
-                for (query_word, frequency, k_value, point_value) in scoring_info:
-                    print("\"{}\" appears {} times, with k_value of {}, giving a score of {}".format(
-                        query_word, frequency, k_value, point_value))
-                    total_score += point_value
-                print("Total score: {}".format(total_score))
-                print("--------------------------------")
-                sys.stdout = original_stdout
+            Utils.dprint("Total score: {}".format(total_score))
+            Utils.dprint("--------------------------------")
             return total_score
 
     doc = Document(title)
 
-    if DEBUG_MODE:
-        print("{} Book length has {} lines".format(title, len(raw_text)))
-
     word_list = []
     for line in raw_text:
         word_list.extend(Utils.best_tokenize(line))
-    doc.num_words = len(word_list)
 
     doc.nltk_word_freq = nltk.FreqDist(word_list)
     doc.nltk_bigram_finder = nltk.collocations.BigramCollocationFinder.from_words(
@@ -171,10 +172,11 @@ def build_document(title, raw_text):
         word_list)
 
     # Relative word frequency
-    word_count = sum(doc.nltk_word_freq.values())
+    doc.simple_word_freq = Counter(word_list)
+    word_count = sum(doc.simple_word_freq.values())
     doc.relative_word_freq = Counter()
-    for word in doc.nltk_word_freq:
-        document_word_rate = doc.nltk_word_freq[word] / word_count
+    for word in doc.simple_word_freq:
+        document_word_rate = doc.simple_word_freq[word] / word_count
         english_word_rate = word_frequency(word, "en")
         doc.relative_word_freq[word] = RARE_WORD_RELATIVE_MULTIPLIER if english_word_rate == 0 else document_word_rate / \
             english_word_rate
@@ -182,14 +184,21 @@ def build_document(title, raw_text):
     return doc
 
 
-# Returns a list of (Book Title, file_path) tuples
 def get_book_file_list():
+    """
+    Returns a list of (Book Title, file_path) tuples. Titles are scraped from
+    the file name.
+    """
     filenames = [(f[:-4], join(RELATIVE_INPUT_SOURCE_DIR, f)) for f in listdir(RELATIVE_INPUT_SOURCE_DIR) if isfile(
         join(RELATIVE_INPUT_SOURCE_DIR, f))]
     return filenames
 
 
 def read_book(file_path):
+    """
+    Reads and returns the contents of a given file. Provides some minimal
+    pre-processing to get rid of boilerplate Project Gutenberg text.
+    """
     with open(file_path, "r") as file:
         lines = file.readlines()
 
@@ -214,12 +223,12 @@ def read_book(file_path):
 
 
 def find_similar_book(query, docs_list):
-    # First we do our scoring
+    """
+    Given a query and a list of documents, pick the best matching document.
+    """
     scores = {doc.title: doc.affinity_score(query) for doc in docs_list}
-
     if DEBUG_MODE:
         print(sorted(scores))
-
     return max(scores, key=scores.get)
 
 
@@ -228,12 +237,6 @@ def main():
     book_list = get_book_file_list()
     for title, path in book_list:
         docs_list.append(build_document(title, read_book(path)))
-
-    # # print(docs_list[0])
-    # bigrams = docs_list[0].nltk_bigram_finder
-    # ngram_fd1 = bigrams.ngram_fd
-    #
-    # print(ngram_fd1.most_common(10))
 
     query = input("[Computer] What's on your mind today?\n[User] ")
     while query:

@@ -1,5 +1,4 @@
-Replace this file with the executable or shell wrapper that will run your program
-
-
-# set up dependencies
-pip install wordfreq
+#!/bin/sh
+python3 -m pip install wordfreq
+python3 -m pip install nltk
+python3 src/recommender.py
